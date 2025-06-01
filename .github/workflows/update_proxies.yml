@@ -56,10 +56,11 @@ jobs:
           git push origin $TAG
 
       - name: Notify on failure
-        if: failure()
-        uses: actions-ecosystem/action-slack-notify@v2
-        with:
-          status: ${{ job.status }}
-          author_name: "Proxy Updater Failed"
-        env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+  if: failure()
+  uses: 8398a7/action-slack@v3
+  with:
+    status: failure
+    fields: job,commit,repo,message
+    author_name: "Proxy Updater"
+  env:
+    SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
