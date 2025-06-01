@@ -34,7 +34,7 @@ jobs:
         run: ulimit -n 1024
 
       - name: Run Proxy Updater
-        run: python main.py --output ./proxies --workers 200 --timeout 5
+        run: python fetch_proxies.py --output ./proxies --workers 200 --timeout 5
         env:
           LOG_LEVEL: "INFO"
 
