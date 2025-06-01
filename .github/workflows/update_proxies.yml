@@ -1,1 +1,32 @@
+name: Update Proxies
 
+on:
+  schedule:
+    - cron: "*/20 * * * *"  # Cada 20 minutos
+  workflow_dispatch:        # Permite ejecutarlo manualmente
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Clonar repositorio
+      uses: actions/checkout@v3
+
+    - name: Configurar Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.x"
+
+    - name: Instalar dependencias
+      run: pip install requests
+
+    - name: Ejecutar script de proxies
+      run: python fetch_proxies.py
+
+    - name: Commit y push si hay cambios
+      run: |
+        git config user.name "github-actions"
+        git config user.email "actions@github.com"
+        git add .
+        git diff --cached --quiet || (git commit -m "🔄 Update proxies" && git push)
