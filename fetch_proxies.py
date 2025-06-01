@@ -1,61 +1,119 @@
-fetch_proxies.py mejorado con asyncio, aiohttp y detección por país
+import requests
+import asyncio
+import aiohttp
+import os
+import json
+from datetime import datetime
 
-import asyncio import aiohttp import os import re from datetime import datetime from aiohttp import ClientTimeout
+# Configuración
+PROXY_SOURCES = [
+    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=all&ssl=all&anonymity=all",
+    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=3000&country=all",
+    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"
+]
 
-=== CONFIGURACIÓN ===
+TIMEOUT = 5
+TEST_URL = "http://httpbin.org/ip"
+IPINFO_URL = "http://ip-api.com/json/"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-SOURCES = { "http": [ "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=all", "https://www.proxy-list.download/api/v1/get?type=http", ], "socks4": [ "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=3000&country=all", ], "socks5": [ "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all", ] }
+# Crear carpetas necesarias
+for folder in ["proxies/http", "proxies/socks4", "proxies/socks5", "proxies/by_country", "logs"]:
+    os.makedirs(folder, exist_ok=True)
 
-API_GEO = "http://ip-api.com/json/{}?fields=countryCode" CONCURRENCY = 100 TIMEOUT = 10
+# Obtener proxies
+def fetch_all_proxies():
+    proxies = {"http": set(), "socks4": set(), "socks5": set()}
+    for url in PROXY_SOURCES:
+        try:
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            lines = r.text.strip().split("\n")
+            if "socks5" in url:
+                proxies["socks5"].update(lines)
+            elif "socks4" in url:
+                proxies["socks4"].update(lines)
+            else:
+                proxies["http"].update(lines)
+        except Exception as e:
+            with open("logs/errors.log", "a") as f:
+                f.write(f"[{datetime.utcnow()}] Error al obtener {url}: {e}\n")
+    return proxies
 
-=== FUNCIONES ===
+# Verificar proxies
+async def test_proxy(session, proxy, proxy_type):
+    try:
+        proxy_url = f"{proxy_type}://{proxy}"
+        async with session.get(TEST_URL, proxy=proxy_url, timeout=TIMEOUT) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                ip = data["origin"]
+                geo = requests.get(IPINFO_URL + ip, timeout=5).json()
+                return {
+                    "proxy": proxy,
+                    "type": proxy_type,
+                    "ip": ip,
+                    "country": geo.get("countryCode", "UNKNOWN")
+                }
+    except:
+        return None
 
-async def fetch_url(session, url): try: async with session.get(url) as response: text = await response.text() return text.strip().splitlines() except: return []
+async def validate_proxies(proxies_by_type):
+    valid = {"http": [], "socks4": [], "socks5": []}
+    by_country = {}
 
-async def validate_proxy(session, proxy, proxy_type): try: proxy_url = f"{proxy_type}://{proxy}" async with session.get("http://example.com", proxy=proxy_url, timeout=ClientTimeout(total=TIMEOUT)) as resp: if resp.status == 200: return proxy except: return None
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
+        tasks = []
+        for proxy_type, proxies in proxies_by_type.items():
+            for proxy in proxies:
+                tasks.append(test_proxy(session, proxy.strip(), proxy_type))
+        results = await asyncio.gather(*tasks)
 
-async def get_country(session, ip): try: async with session.get(API_GEO.format(ip), timeout=ClientTimeout(total=5)) as resp: data = await resp.json() return data.get("countryCode") except: return None
+    for result in results:
+        if result:
+            proxy = result["proxy"]
+            proxy_type = result["type"]
+            country = result["country"]
+            valid[proxy_type].append(proxy)
 
-async def process_type(session, proxy_type, urls): proxies = set() for url in urls: lines = await fetch_url(session, url) proxies.update([p for p in lines if re.match(r"\d+.\d+.\d+.\d+:\d+", p)])
+            if country not in by_country:
+                by_country[country] = []
+            by_country[country].append(proxy)
 
-print(f"{proxy_type.upper()} - Total descargados: {len(proxies)}")
+    return valid, by_country
 
-sem = asyncio.Semaphore(CONCURRENCY)
-results = []
+# Guardar proxies
+def save_proxies(valid, by_country):
+    for proxy_type, proxies in valid.items():
+        path = f"proxies/{proxy_type}/proxies.txt"
+        with open(path, "w") as f:
+            f.write("\n".join(proxies))
 
-async def check(proxy):
-    async with sem:
-        valid = await validate_proxy(session, proxy, proxy_type)
-        if valid:
-            country = await get_country(session, proxy.split(":")[0])
-            results.append((valid, country))
+    for country, proxies in by_country.items():
+        path = f"proxies/by_country/{country.upper()}.txt"
+        with open(path, "w") as f:
+            f.write("\n".join(proxies))
 
-await asyncio.gather(*(check(p) for p in proxies))
-return results
+    stats = {
+        "timestamp": str(datetime.utcnow()),
+        "counts": {k: len(v) for k, v in valid.items()},
+        "total": sum(len(v) for v in valid.values())
+    }
+    with open("stats.json", "w") as f:
+        json.dump(stats, f, indent=2)
 
-async def main(): os.makedirs("proxies", exist_ok=True) async with aiohttp.ClientSession() as session: all_results = {"http": [], "socks4": [], "socks5": []}
+# Principal
+def main():
+    print("📡 Obteniendo proxies...")
+    proxies = fetch_all_proxies()
+    print("🧪 Verificando proxies...")
+    valid, by_country = asyncio.run(validate_proxies(proxies))
+    print("💾 Guardando proxies...")
+    save_proxies(valid, by_country)
+    print("✅ Listo.")
 
-for proxy_type, urls in SOURCES.items():
-        results = await process_type(session, proxy_type, urls)
-        all_results[proxy_type].extend(results)
-
-        # Guardar por tipo
-        with open(f"proxies/{proxy_type}.txt", "w") as f:
-            for proxy, _ in results:
-                f.write(f"{proxy}\n")
-
-    # Guardar por país
-    country_map = {}
-    for proxy_type, proxies in all_results.items():
-        for proxy, country in proxies:
-            if not country:
-                continue
-            path = f"proxies/by_country/{country.upper()}"
-            os.makedirs(path, exist_ok=True)
-            with open(f"{path}/{proxy_type}.txt", "a") as f:
-                f.write(f"{proxy}\n")
-
-    print("Proceso finalizado.")
-
-if name == "main": asyncio.run(main())
-
+if __name__ == "__main__":
+    main()
